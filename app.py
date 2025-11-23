@@ -13,7 +13,14 @@ from functools import wraps
 import os
 
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(32)  # Change this for production
+# FIXED: Better session configuration
+app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['SESSION_PERMANENT'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
+app.config['SESSION_COOKIE_SECURE'] = False  # Set to True if using HTTPS
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 CORS(app)
 
 # Database setup
@@ -303,6 +310,7 @@ def admin_login():
         
         if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
             session['admin_logged_in'] = True
+            session.permanent = True
             return redirect(url_for('admin_dashboard'))
         else:
             return render_template('login.html', error='Invalid credentials')
@@ -401,6 +409,63 @@ def delete_license(license_key):
         db.commit()
         db.close()
         return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# FIXED: New endpoint to get updated stats and licenses
+@app.route('/admin/get_licenses', methods=['GET'])
+@require_admin
+def get_licenses():
+    """Get updated license data without page reload"""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Get statistics
+        cursor.execute('SELECT COUNT(*) FROM licenses')
+        total_licenses = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM licenses WHERE status = ?', ('active',))
+        active_licenses = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM licenses WHERE status = ?', ('unused',))
+        unused_licenses = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM licenses WHERE status = ?', ('expired',))
+        expired_licenses = cursor.fetchone()[0]
+        
+        # Get recent licenses
+        cursor.execute(
+            'SELECT * FROM licenses ORDER BY created_at DESC LIMIT 50'
+        )
+        licenses_data = cursor.fetchall()
+        
+        db.close()
+        
+        # Convert to dict
+        licenses = []
+        for lic in licenses_data:
+            licenses.append({
+                'license_key': lic['license_key'],
+                'status': lic['status'],
+                'days': lic['days'],
+                'created_at': lic['created_at'][:10] if lic['created_at'] else '-',
+                'activated_at': lic['activated_at'][:10] if lic['activated_at'] else '-',
+                'expires_at': lic['expires_at'][:10] if lic['expires_at'] else '-',
+                'customer_email': lic['customer_email'] or '-'
+            })
+        
+        return jsonify({
+            'success': True,
+            'stats': {
+                'total': total_licenses,
+                'active': active_licenses,
+                'unused': unused_licenses,
+                'expired': expired_licenses
+            },
+            'licenses': licenses
+        })
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
