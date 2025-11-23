@@ -1,11 +1,10 @@
 """
-License Server - Handles license verification and activation
-Deploy this on your Windows VPS or free hosting
+License Server - COMPLETELY FIXED VERSION
+Handles license verification and activation
 """
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session
 from flask_cors import CORS
 import sqlite3
-import hashlib
 import secrets
 import string
 from datetime import datetime, timedelta
@@ -13,22 +12,24 @@ from functools import wraps
 import os
 
 app = Flask(__name__)
-# FIXED: Better session configuration
-app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
-app.config['SESSION_TYPE'] = 'filesystem'
-app.config['SESSION_PERMANENT'] = True
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
-app.config['SESSION_COOKIE_SECURE'] = False  # Set to True if using HTTPS
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-CORS(app)
+
+# CRITICAL FIX: Proper session configuration
+app.secret_key = os.environ.get('SECRET_KEY', 'change-this-to-random-secret-key-in-production')
+app.config.update(
+    SESSION_COOKIE_NAME='license_session',
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),  # 7 days session
+    SESSION_REFRESH_EACH_REQUEST=True  # Keep session alive
+)
+CORS(app, supports_credentials=True)
 
 # Database setup
 DATABASE = 'licenses.db'
 
 # Admin credentials - CHANGE THESE!
 ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "changeme123"  # CHANGE THIS!
+ADMIN_PASSWORD = "changeme123"
 
 def get_db():
     """Get database connection"""
@@ -41,7 +42,6 @@ def init_db():
     db = get_db()
     cursor = db.cursor()
     
-    # Licenses table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS licenses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +57,6 @@ def init_db():
         )
     ''')
     
-    # Activation logs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS activation_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +73,6 @@ def init_db():
 
 def generate_license_key():
     """Generate a unique license key"""
-    # Format: XXXX-XXXX-XXXX-XXXX
     chars = string.ascii_uppercase + string.digits
     parts = []
     for _ in range(4):
@@ -83,10 +81,17 @@ def generate_license_key():
     return '-'.join(parts)
 
 def require_admin(f):
-    """Decorator to require admin authentication"""
+    """Decorator to require admin authentication - FIXED for JSON responses"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get('admin_logged_in'):
+            # CRITICAL FIX: Return JSON if it's an AJAX request
+            if request.is_json or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({
+                    'error': 'Not authenticated',
+                    'redirect': '/admin/login'
+                }), 401
+            # Otherwise redirect normally
             return redirect(url_for('admin_login'))
         return f(*args, **kwargs)
     return decorated_function
@@ -110,7 +115,6 @@ def verify_license():
         db = get_db()
         cursor = db.cursor()
         
-        # Get license info
         cursor.execute(
             'SELECT * FROM licenses WHERE license_key = ?',
             (license_key,)
@@ -118,7 +122,6 @@ def verify_license():
         license_data = cursor.fetchone()
         
         if not license_data:
-            # Log failed attempt
             cursor.execute(
                 'INSERT INTO activation_logs (license_key, hwid, action, ip_address) VALUES (?, ?, ?, ?)',
                 (license_key, hwid, 'verify_failed_invalid', request.remote_addr)
@@ -131,7 +134,6 @@ def verify_license():
                 'message': 'Invalid license key'
             })
         
-        # Check status
         if license_data['status'] == 'unused':
             db.close()
             return jsonify({
@@ -139,7 +141,6 @@ def verify_license():
                 'message': 'License not activated. Please activate first.'
             })
         
-        # Check HWID match
         if license_data['hwid'] != hwid:
             cursor.execute(
                 'INSERT INTO activation_logs (license_key, hwid, action, ip_address) VALUES (?, ?, ?, ?)',
@@ -153,7 +154,6 @@ def verify_license():
                 'message': 'HWID mismatch. This license is bound to another computer.'
             })
         
-        # Check expiration
         if license_data['expires_at']:
             expires_at = datetime.fromisoformat(license_data['expires_at'])
             if datetime.now() > expires_at:
@@ -173,7 +173,6 @@ def verify_license():
                     'message': 'License expired'
                 })
             
-            # Calculate days remaining
             days_remaining = (expires_at - datetime.now()).days
             
             cursor.execute(
@@ -190,7 +189,6 @@ def verify_license():
                 'expires_at': license_data['expires_at']
             })
         
-        # Should not reach here
         db.close()
         return jsonify({
             'valid': False,
@@ -220,7 +218,6 @@ def activate_license():
         db = get_db()
         cursor = db.cursor()
         
-        # Get license info
         cursor.execute(
             'SELECT * FROM licenses WHERE license_key = ?',
             (license_key,)
@@ -240,9 +237,7 @@ def activate_license():
                 'message': 'Invalid license key'
             })
         
-        # Check if already activated
         if license_data['status'] == 'active':
-            # Check if HWID matches
             if license_data['hwid'] == hwid:
                 db.close()
                 return jsonify({
@@ -263,7 +258,6 @@ def activate_license():
                 'message': 'License has expired'
             })
         
-        # Activate license
         activated_at = datetime.now()
         expires_at = activated_at + timedelta(days=license_data['days'])
         
@@ -310,18 +304,30 @@ def admin_login():
         
         if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
             session['admin_logged_in'] = True
-            session.permanent = True
+            session.permanent = True  # CRITICAL: Make session permanent
             return redirect(url_for('admin_dashboard'))
         else:
             return render_template('login.html', error='Invalid credentials')
+    
+    # If already logged in, go to dashboard
+    if session.get('admin_logged_in'):
+        return redirect(url_for('admin_dashboard'))
     
     return render_template('login.html')
 
 @app.route('/admin/logout')
 def admin_logout():
     """Admin logout"""
-    session.pop('admin_logged_in', None)
+    session.clear()
     return redirect(url_for('admin_login'))
+
+# CRITICAL FIX: Check session endpoint
+@app.route('/admin/check_session', methods=['GET'])
+def check_session():
+    """Check if user is still logged in"""
+    return jsonify({
+        'logged_in': session.get('admin_logged_in', False)
+    })
 
 @app.route('/admin/dashboard')
 @require_admin
@@ -330,7 +336,6 @@ def admin_dashboard():
     db = get_db()
     cursor = db.cursor()
     
-    # Get statistics
     cursor.execute('SELECT COUNT(*) FROM licenses')
     total_licenses = cursor.fetchone()[0]
     
@@ -343,7 +348,6 @@ def admin_dashboard():
     cursor.execute('SELECT COUNT(*) FROM licenses WHERE status = ?', ('expired',))
     expired_licenses = cursor.fetchone()[0]
     
-    # Get recent licenses
     cursor.execute(
         'SELECT * FROM licenses ORDER BY created_at DESC LIMIT 50'
     )
@@ -371,7 +375,7 @@ def generate_license():
         customer_note = request.form.get('customer_note', '')
         
         if count > 100:
-            return jsonify({'error': 'Maximum 100 keys at once'}), 400
+            return jsonify({'success': False, 'error': 'Maximum 100 keys at once'}), 400
         
         db = get_db()
         cursor = db.cursor()
@@ -396,9 +400,9 @@ def generate_license():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/admin/delete/<license_key>', methods=['POST'])
+@app.route('/admin/delete/<license_key>', methods=['POST', 'DELETE'])
 @require_admin
 def delete_license(license_key):
     """Delete a license"""
@@ -406,13 +410,17 @@ def delete_license(license_key):
         db = get_db()
         cursor = db.cursor()
         cursor.execute('DELETE FROM licenses WHERE license_key = ?', (license_key,))
+        deleted = cursor.rowcount > 0
         db.commit()
         db.close()
-        return jsonify({'success': True})
+        
+        return jsonify({
+            'success': True,
+            'deleted': deleted
+        })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
-# FIXED: New endpoint to get updated stats and licenses
 @app.route('/admin/get_licenses', methods=['GET'])
 @require_admin
 def get_licenses():
@@ -421,7 +429,6 @@ def get_licenses():
         db = get_db()
         cursor = db.cursor()
         
-        # Get statistics
         cursor.execute('SELECT COUNT(*) FROM licenses')
         total_licenses = cursor.fetchone()[0]
         
@@ -434,7 +441,6 @@ def get_licenses():
         cursor.execute('SELECT COUNT(*) FROM licenses WHERE status = ?', ('expired',))
         expired_licenses = cursor.fetchone()[0]
         
-        # Get recent licenses
         cursor.execute(
             'SELECT * FROM licenses ORDER BY created_at DESC LIMIT 50'
         )
@@ -442,7 +448,6 @@ def get_licenses():
         
         db.close()
         
-        # Convert to dict
         licenses = []
         for lic in licenses_data:
             licenses.append({
@@ -467,7 +472,7 @@ def get_licenses():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/admin/logs')
 @require_admin
@@ -481,7 +486,6 @@ def view_logs():
     return render_template('logs.html', logs=logs)
 
 if __name__ == '__main__':
-    # Initialize database
     init_db()
     print("\n" + "="*50)
     print("License Server Starting...")
@@ -492,5 +496,4 @@ if __name__ == '__main__':
     print("\nWARNING: Change the admin password before deploying!")
     print("\n")
     
-    # Run server
     app.run(host='0.0.0.0', port=5000, debug=True)
